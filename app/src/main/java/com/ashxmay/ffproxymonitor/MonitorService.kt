@@ -8,11 +8,11 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.TrafficStats
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.TrafficStats
 import androidx.core.app.NotificationCompat
 import java.io.File
 import java.io.FileWriter
