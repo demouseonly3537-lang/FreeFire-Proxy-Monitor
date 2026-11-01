@@ -3,6 +3,7 @@ package com.ashxmay.ffproxymonitor
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
@@ -30,9 +31,25 @@ class MonitorService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var isVpnActive = false
     private var freeFireUid = -1
+    private var freeFirePkg = "none"
     private var lastRx: Long = 0
     private var lastTx: Long = 0
     private lateinit var logFile: File
+
+    private val candidates = listOf(
+        "com.dts.freefireth",
+        "com.dts.freefiremax",
+        "com.garena.game.kgth",
+        "com.garena.game.kgvn",
+        "com.garena.game.kgtw",
+        "com.garena.game.kgid",
+        "com.garena.game.kgph",
+        "com.garena.game.kgmy",
+        "com.garena.game.kgbr",
+        "com.garena.game.kgid",
+        "com.tencent.tmgp.pubgmhd",
+        "com.garena.game.freefire"
+    )
 
     private val logRunnable = object : Runnable {
         override fun run() {
@@ -50,7 +67,7 @@ class MonitorService : Service() {
         registerVpnCallback()
         checkCurrentVpnState()
         handler.post(logRunnable)
-        appendLog("Service created. UID=$freeFireUid  PID=${Process.myPid()}")
+        appendLog("Service created. pkg=$freeFirePkg UID=$freeFireUid PID=${Process.myPid()}")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -70,18 +87,43 @@ class MonitorService : Service() {
     }
 
     private fun resolveFreeFireUid() {
-        try {
-            val pm = packageManager
-            val info = pm.getApplicationInfo("com.dts.freefireth", 0)
-            freeFireUid = info.uid
-            appendLog("Free Fire UID resolved: $freeFireUid")
-        } catch (e: PackageManager.NameNotFoundException) {
-            appendLog("ERROR: Free Fire not installed (com.dts.freefireth)")
-            freeFireUid = -1
-        } catch (e: Exception) {
-            appendLog("ERROR resolve UID: ${e.message}")
-            freeFireUid = -1
+        val pm = packageManager
+        // First try known packages
+        for (pkg in candidates) {
+            try {
+                val info = pm.getApplicationInfo(pkg, 0)
+                freeFireUid = info.uid
+                freeFirePkg = pkg
+                appendLog("Found Free Fire: $pkg UID=$freeFireUid")
+                return
+            } catch (_: Exception) {}
         }
+
+        // Scan all installed packages for freefire / garena free fire
+        try {
+            val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+            for (app in apps) {
+                val name = app.packageName.lowercase()
+                val label = try {
+                    pm.getApplicationLabel(app).toString().lowercase()
+                } catch (_: Exception) { "" }
+
+                if (name.contains("freefire") || name.contains("free.fire") ||
+                    (name.contains("garena") && (label.contains("free fire") || label.contains("freefire"))) ||
+                    label.contains("free fire") || label.contains("freefire")) {
+                    freeFireUid = app.uid
+                    freeFirePkg = app.packageName
+                    appendLog("Auto-detected: $freeFirePkg UID=$freeFireUid label=$label")
+                    return
+                }
+            }
+        } catch (e: Exception) {
+            appendLog("Scan error: ${e.message}")
+        }
+
+        appendLog("ERROR: Free Fire package not found on device")
+        freeFireUid = -1
+        freeFirePkg = "none"
     }
 
     private fun setupLogFile() {
