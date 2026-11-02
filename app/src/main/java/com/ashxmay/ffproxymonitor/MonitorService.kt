@@ -16,8 +16,6 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.Process
-import android.os.RemoteException
-import android.telephony.TelephonyManager
 import androidx.core.app.NotificationCompat
 import java.io.File
 import java.io.FileWriter
@@ -35,8 +33,13 @@ class MonitorService : Service() {
     private var isVpnActive = false
     private var freeFireUid = -1
     private var freeFirePkg = "none"
-    private var lastRx: Long = 0
-    private var lastTx: Long = 0
+    private var lastDevRx: Long = 0
+    private var lastDevTx: Long = 0
+    private var lastFfRx: Long = 0
+    private var lastFfTx: Long = 0
+    private var phaseStartRx: Long = 0
+    private var phaseStartTx: Long = 0
+    private var phaseStartTime: Long = 0
     private lateinit var logFile: File
     private var networkStatsManager: NetworkStatsManager? = null
 
@@ -51,8 +54,7 @@ class MonitorService : Service() {
         "com.garena.game.kgph",
         "com.garena.game.kgmy",
         "com.garena.game.kgbr",
-        "com.garena.game.freefire",
-        "com.tencent.tmgp.pubgmhd"
+        "com.garena.game.freefire"
     )
 
     private val logRunnable = object : Runnable {
@@ -73,6 +75,14 @@ class MonitorService : Service() {
         resolveFreeFireUid()
         registerVpnCallback()
         checkCurrentVpnState()
+        // init phase counters
+        val rx = TrafficStats.getTotalRxBytes()
+        val tx = TrafficStats.getTotalTxBytes()
+        lastDevRx = rx
+        lastDevTx = tx
+        phaseStartRx = rx
+        phaseStartTx = tx
+        phaseStartTime = System.currentTimeMillis()
         handler.post(logRunnable)
         appendLog("Service created. pkg=$freeFirePkg UID=$freeFireUid PID=${Process.myPid()}")
     }
@@ -104,41 +114,24 @@ class MonitorService : Service() {
                 return
             } catch (_: Exception) {}
         }
-
         try {
             val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-            val possible = mutableListOf<String>()
             for (app in apps) {
                 val name = app.packageName.lowercase()
-                val label = try {
-                    pm.getApplicationLabel(app).toString().lowercase()
-                } catch (_: Exception) { "" }
-
+                val label = try { pm.getApplicationLabel(app).toString().lowercase() } catch (_: Exception) { "" }
                 if (name.contains("freefire") || name.contains("free.fire") || name.contains("ffi") ||
-                    name.contains("garena") || label.contains("free fire") || label.contains("freefire")) {
-                    possible.add("${app.packageName} | $label | uid=${app.uid}")
-                }
-
-                if (name.contains("freefire") || name.contains("free.fire") ||
-                    (name.contains("garena") && (label.contains("free fire") || label.contains("freefire") || label.contains("ffi"))) ||
-                    label.contains("free fire") || label.contains("freefire")) {
+                    (name.contains("garena") && (label.contains("free fire") || label.contains("freefire"))) ||
+                    label.contains("free fire")) {
                     freeFireUid = app.uid
                     freeFirePkg = app.packageName
-                    appendLog("Auto-detected: $freeFirePkg UID=$freeFireUid label=$label")
+                    appendLog("Auto-detected: $freeFirePkg UID=$freeFireUid")
                     return
                 }
-            }
-            if (possible.isNotEmpty()) {
-                appendLog("Possible related packages found:")
-                possible.forEach { appendLog("  → $it") }
-            } else {
-                appendLog("No freefire/garena related package found on device")
             }
         } catch (e: Exception) {
             appendLog("Scan error: ${e.message}")
         }
-
-        appendLog("ERROR: Free Fire package not found on device")
+        appendLog("ERROR: Free Fire package not found")
         freeFireUid = -1
         freeFirePkg = "none"
     }
@@ -146,9 +139,7 @@ class MonitorService : Service() {
     private fun setupLogFile() {
         val dir = getExternalFilesDir(null) ?: filesDir
         logFile = File(dir, "ff_proxy_monitor_log.txt")
-        if (!logFile.exists()) {
-            logFile.createNewFile()
-        }
+        if (!logFile.exists()) logFile.createNewFile()
         appendLog("=== FF PROXY MONITOR STARTED ===")
         appendLog("Log path: ${logFile.absolutePath}")
         appendLog("Time: ${now()}")
@@ -170,102 +161,119 @@ class MonitorService : Service() {
         networkCallback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 if (!isVpnActive) {
+                    // close previous phase summary
+                    writePhaseSummary("BEFORE_PROXY")
                     isVpnActive = true
+                    // reset phase counters
+                    val rx = TrafficStats.getTotalRxBytes()
+                    val tx = TrafficStats.getTotalTxBytes()
+                    phaseStartRx = rx
+                    phaseStartTx = tx
+                    phaseStartTime = System.currentTimeMillis()
                     appendLog("")
                     appendLog("========== PROXY / VPN CONNECTED ==========")
                     appendLog("Timestamp: ${now()}")
                     appendLog("Status: PROXY ON - ab se AFTER data")
                     logNetworkInterfaces()
-                    snapshotTraffic("PROXY_ON_SNAPSHOT")
-                    updateNotification("VPN/Proxy ACTIVE - logging AFTER data")
+                    updateNotification("VPN/Proxy ACTIVE - AFTER data")
                 }
             }
 
             override fun onLost(network: Network) {
                 if (isVpnActive) {
+                    writePhaseSummary("AFTER_PROXY")
                     isVpnActive = false
+                    val rx = TrafficStats.getTotalRxBytes()
+                    val tx = TrafficStats.getTotalTxBytes()
+                    phaseStartRx = rx
+                    phaseStartTx = tx
+                    phaseStartTime = System.currentTimeMillis()
                     appendLog("")
                     appendLog("========== PROXY / VPN DISCONNECTED ==========")
                     appendLog("Timestamp: ${now()}")
                     appendLog("Status: PROXY OFF - ab se BEFORE data")
-                    snapshotTraffic("PROXY_OFF_SNAPSHOT")
-                    updateNotification("VPN/Proxy OFF - logging BEFORE data")
+                    updateNotification("VPN/Proxy OFF - BEFORE data")
                 }
             }
         }
         connectivityManager.registerNetworkCallback(request, networkCallback!!)
     }
 
-    /** Get RX/TX for Free Fire UID. Tries TrafficStats first, then NetworkStatsManager. */
-    private fun getFfTraffic(): Pair<Long, Long> {
-        if (freeFireUid == -1) return -1L to -1L
+    private fun writePhaseSummary(phase: String) {
+        val nowRx = TrafficStats.getTotalRxBytes()
+        val nowTx = TrafficStats.getTotalTxBytes()
+        val dRx = (nowRx - phaseStartRx).coerceAtLeast(0)
+        val dTx = (nowTx - phaseStartTx).coerceAtLeast(0)
+        val sec = ((System.currentTimeMillis() - phaseStartTime) / 1000).coerceAtLeast(1)
+        val kbpsDown = (dRx * 8 / 1000) / sec
+        val kbpsUp = (dTx * 8 / 1000) / sec
+        appendLog("")
+        appendLog("----- $phase PHASE SUMMARY -----")
+        appendLog("Duration: ${sec}s")
+        appendLog("Downloaded: ${formatBytes(dRx)}  (${kbpsDown} kbps avg)")
+        appendLog("Uploaded:   ${formatBytes(dTx)}  (${kbpsUp} kbps avg)")
+        appendLog("-------------------------------")
+        appendLog("")
+    }
 
-        // 1. Try classic TrafficStats
+    private fun formatBytes(b: Long): String {
+        return when {
+            b >= 1_000_000 -> String.format("%.2f MB", b / 1_000_000.0)
+            b >= 1_000 -> String.format("%.1f KB", b / 1_000.0)
+            else -> "$b B"
+        }
+    }
+
+    private fun getFfTraffic(): Pair<Long, Long>? {
+        if (freeFireUid == -1) return null
+
+        // TrafficStats first
         val rxTs = TrafficStats.getUidRxBytes(freeFireUid)
         val txTs = TrafficStats.getUidTxBytes(freeFireUid)
-        if (rxTs != TrafficStats.UNSUPPORTED.toLong() && txTs != TrafficStats.UNSUPPORTED.toLong()) {
+        if (rxTs != TrafficStats.UNSUPPORTED.toLong() && txTs != TrafficStats.UNSUPPORTED.toLong() && rxTs >= 0) {
             return rxTs to txTs
         }
 
-        // 2. Fallback: NetworkStatsManager (needs Usage Access)
+        // NetworkStatsManager fallback
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && networkStatsManager != null) {
             try {
                 val end = System.currentTimeMillis()
-                val start = end - 24 * 60 * 60 * 1000L // last 24h cumulative
-
+                val start = end - 12 * 60 * 60 * 1000L
                 var rx = 0L
                 var tx = 0L
 
-                // Mobile
+                // try wifi
                 try {
-                    val subId = try {
-                        val tm = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) tm.subscriberId else ""
-                    } catch (_: Exception) { "" }
-
-                    val bucketMobile = networkStatsManager!!.querySummaryForDevice(
-                        ConnectivityManager.TYPE_MOBILE, subId, start, end
-                    )
-                    // Better: query per UID
-                    val statsMobile = networkStatsManager!!.queryDetailsForUid(
-                        ConnectivityManager.TYPE_MOBILE, subId, start, end, freeFireUid
-                    )
-                    val bucket = NetworkStats.Bucket()
-                    while (statsMobile.hasNextBucket()) {
-                        statsMobile.getNextBucket(bucket)
-                        rx += bucket.rxBytes
-                        tx += bucket.txBytes
-                    }
-                    statsMobile.close()
-                } catch (_: Exception) {}
-
-                // Wi-Fi
-                try {
-                    val statsWifi = networkStatsManager!!.queryDetailsForUid(
+                    val s = networkStatsManager!!.queryDetailsForUid(
                         ConnectivityManager.TYPE_WIFI, "", start, end, freeFireUid
                     )
-                    val bucket = NetworkStats.Bucket()
-                    while (statsWifi.hasNextBucket()) {
-                        statsWifi.getNextBucket(bucket)
-                        rx += bucket.rxBytes
-                        tx += bucket.txBytes
+                    val b = NetworkStats.Bucket()
+                    while (s.hasNextBucket()) {
+                        s.getNextBucket(b)
+                        rx += b.rxBytes
+                        tx += b.txBytes
                     }
-                    statsWifi.close()
+                    s.close()
                 } catch (_: Exception) {}
 
-                if (rx > 0 || tx > 0) {
-                    return rx to tx
-                }
-            } catch (e: RemoteException) {
-                appendLog("NetworkStats error: ${e.message}")
-            } catch (e: SecurityException) {
-                appendLog("NetworkStats SecurityException - Usage Access chahiye")
-            } catch (e: Exception) {
-                appendLog("NetworkStats fail: ${e.message}")
-            }
-        }
+                // try mobile with empty subscriber
+                try {
+                    val s = networkStatsManager!!.queryDetailsForUid(
+                        ConnectivityManager.TYPE_MOBILE, "", start, end, freeFireUid
+                    )
+                    val b = NetworkStats.Bucket()
+                    while (s.hasNextBucket()) {
+                        s.getNextBucket(b)
+                        rx += b.rxBytes
+                        tx += b.txBytes
+                    }
+                    s.close()
+                } catch (_: Exception) {}
 
-        return -2L to -2L // special: unsupported even after fallback
+                if (rx > 0 || tx > 0) return rx to tx
+            } catch (_: Exception) {}
+        }
+        return null
     }
 
     private fun logFullState() {
@@ -273,26 +281,33 @@ class MonitorService : Service() {
         val sb = StringBuilder()
         sb.append("[${now()}] [$phase] ")
 
-        if (freeFireUid != -1) {
-            val (rx, tx) = getFfTraffic()
-            when {
-                rx == -1L -> sb.append("FF_UID=NOT_FOUND ")
-                rx == -2L -> sb.append("FF_TRAFFIC=NEED_USAGE_ACCESS ")
-                else -> {
-                    val deltaRx = if (lastRx == 0L) 0 else (rx - lastRx).coerceAtLeast(0)
-                    val deltaTx = if (lastTx == 0L) 0 else (tx - lastTx).coerceAtLeast(0)
-                    lastRx = rx
-                    lastTx = tx
-                    sb.append("FF_RX=$rx FF_TX=$tx dRX=$deltaRx dTX=$deltaTx ")
-                }
-            }
+        // Free Fire traffic if available
+        val ff = getFfTraffic()
+        if (ff != null) {
+            val (rx, tx) = ff
+            val dRx = if (lastFfRx == 0L) 0 else (rx - lastFfRx).coerceAtLeast(0)
+            val dTx = if (lastFfTx == 0L) 0 else (tx - lastFfTx).coerceAtLeast(0)
+            lastFfRx = rx
+            lastFfTx = tx
+            sb.append("FF_RX=$rx FF_TX=$tx dRX=$dRx dTX=$dTx ")
         } else {
-            sb.append("FF_UID=NOT_FOUND ")
+            sb.append("FF_pkg=$freeFirePkg ")
         }
 
+        // Device total + delta (always works)
         val totalRx = TrafficStats.getTotalRxBytes()
         val totalTx = TrafficStats.getTotalTxBytes()
-        sb.append("DEV_RX=$totalRx DEV_TX=$totalTx ")
+        val dRx = if (lastDevRx == 0L) 0 else (totalRx - lastDevRx).coerceAtLeast(0)
+        val dTx = if (lastDevTx == 0L) 0 else (totalTx - lastDevTx).coerceAtLeast(0)
+        lastDevRx = totalRx
+        lastDevTx = totalTx
+
+        // speed estimate (last 3 sec)
+        val kbpsDown = (dRx * 8 / 1000) / 3
+        val kbpsUp = (dTx * 8 / 1000) / 3
+
+        sb.append("DEV_dRX=${formatBytes(dRx)} DEV_dTX=${formatBytes(dTx)} ")
+        sb.append("${kbpsDown}↓/${kbpsUp}↑ kbps ")
 
         val ifaces = getVpnInterfaces()
         sb.append("IFACES=$ifaces")
@@ -304,8 +319,8 @@ class MonitorService : Service() {
         try {
             val list = Collections.list(NetworkInterface.getNetworkInterfaces())
             for (nif in list) {
-                if (nif.isUp) {
-                    appendLog("  IFACE: ${nif.name}  up=${nif.isUp}  loopback=${nif.isLoopback}")
+                if (nif.isUp && !nif.isLoopback) {
+                    appendLog("  IFACE: ${nif.name}")
                 }
             }
         } catch (e: Exception) {
@@ -324,15 +339,6 @@ class MonitorService : Service() {
         }
     }
 
-    private fun snapshotTraffic(tag: String) {
-        if (freeFireUid == -1) {
-            appendLog("[$tag] FF not found")
-            return
-        }
-        val (rx, tx) = getFfTraffic()
-        appendLog("[$tag] FF_RX=$rx FF_TX=$tx")
-    }
-
     private fun appendLog(line: String) {
         try {
             if (::logFile.isInitialized) {
@@ -349,13 +355,8 @@ class MonitorService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                channelId,
-                "FF Proxy Monitor",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            val channel = NotificationChannel(channelId, "FF Proxy Monitor", NotificationManager.IMPORTANCE_LOW)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
 
@@ -369,8 +370,6 @@ class MonitorService : Service() {
     }
 
     private fun updateNotification(text: String) {
-        val notification = buildNotification(text)
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(notificationId, notification)
+        getSystemService(NotificationManager::class.java).notify(notificationId, buildNotification(text))
     }
 }
