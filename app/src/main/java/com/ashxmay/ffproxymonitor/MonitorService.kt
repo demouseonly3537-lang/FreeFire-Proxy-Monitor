@@ -3,7 +3,6 @@ package com.ashxmay.ffproxymonitor
 import android.app.*
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
@@ -36,9 +35,11 @@ class MonitorService : Service() {
     private var lastTx: Long = 0
     private lateinit var logFile: File
 
+    // Free Fire India + all known variants
     private val candidates = listOf(
-        "com.dts.freefireth",
-        "com.dts.freefiremax",
+        "com.garena.game.ffi",          // Free Fire India (most common now)
+        "com.dts.freefireth",            // Global Free Fire
+        "com.dts.freefiremax",           // Free Fire MAX
         "com.garena.game.kgth",
         "com.garena.game.kgvn",
         "com.garena.game.kgtw",
@@ -46,9 +47,8 @@ class MonitorService : Service() {
         "com.garena.game.kgph",
         "com.garena.game.kgmy",
         "com.garena.game.kgbr",
-        "com.garena.game.kgid",
-        "com.tencent.tmgp.pubgmhd",
-        "com.garena.game.freefire"
+        "com.garena.game.freefire",
+        "com.tencent.tmgp.pubgmhd"
     )
 
     private val logRunnable = object : Runnable {
@@ -62,8 +62,8 @@ class MonitorService : Service() {
         super.onCreate()
         connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         createNotificationChannel()
+        setupLogFile()               // MUST be first so appendLog works
         resolveFreeFireUid()
-        setupLogFile()
         registerVpnCallback()
         checkCurrentVpnState()
         handler.post(logRunnable)
@@ -88,7 +88,8 @@ class MonitorService : Service() {
 
     private fun resolveFreeFireUid() {
         val pm = packageManager
-        // First try known packages
+
+        // 1. Try known packages first (fast)
         for (pkg in candidates) {
             try {
                 val info = pm.getApplicationInfo(pkg, 0)
@@ -99,23 +100,38 @@ class MonitorService : Service() {
             } catch (_: Exception) {}
         }
 
-        // Scan all installed packages for freefire / garena free fire
+        // 2. Full scan of all installed apps
         try {
             val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+            val possible = mutableListOf<String>()
+
             for (app in apps) {
                 val name = app.packageName.lowercase()
                 val label = try {
                     pm.getApplicationLabel(app).toString().lowercase()
                 } catch (_: Exception) { "" }
 
+                if (name.contains("freefire") || name.contains("free.fire") || name.contains("ffi") ||
+                    name.contains("garena") || label.contains("free fire") || label.contains("freefire")) {
+                    possible.add("${app.packageName} | $label | uid=${app.uid}")
+                }
+
                 if (name.contains("freefire") || name.contains("free.fire") ||
-                    (name.contains("garena") && (label.contains("free fire") || label.contains("freefire"))) ||
+                    (name.contains("garena") && (label.contains("free fire") || label.contains("freefire") || label.contains("ffi"))) ||
                     label.contains("free fire") || label.contains("freefire")) {
                     freeFireUid = app.uid
                     freeFirePkg = app.packageName
                     appendLog("Auto-detected: $freeFirePkg UID=$freeFireUid label=$label")
                     return
                 }
+            }
+
+            // If still not found, dump possible packages so we can see
+            if (possible.isNotEmpty()) {
+                appendLog("Possible related packages found:")
+                possible.forEach { appendLog("  → $it") }
+            } else {
+                appendLog("No freefire/garena related package found on device")
             }
         } catch (e: Exception) {
             appendLog("Scan error: ${e.message}")
@@ -246,7 +262,9 @@ class MonitorService : Service() {
 
     private fun appendLog(line: String) {
         try {
-            FileWriter(logFile, true).use { it.appendLine(line) }
+            if (::logFile.isInitialized) {
+                FileWriter(logFile, true).use { it.appendLine(line) }
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
