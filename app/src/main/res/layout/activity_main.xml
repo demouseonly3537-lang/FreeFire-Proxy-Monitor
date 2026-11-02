@@ -3,34 +3,48 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="16dp">
+    android:padding="12dp">
 
     <TextView
         android:id="@+id/statusText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Monitor STOPPED"
-        android:textSize="16sp"
-        android:layout_marginBottom="12dp" />
+        android:textSize="15sp"
+        android:layout_marginBottom="8dp" />
 
     <Button
         android:id="@+id/startBtn"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="START MONITOR"
-        android:layout_marginBottom="8dp" />
+        android:layout_marginBottom="6dp" />
 
     <Button
         android:id="@+id/stopBtn"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="STOP MONITOR"
-        android:layout_marginBottom="12dp" />
+        android:layout_marginBottom="6dp" />
+
+    <Button
+        android:id="@+id/usageBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="USAGE ACCESS ON KARO (ZAROORI)"
+        android:layout_marginBottom="6dp" />
+
+    <Button
+        android:id="@+id/copyBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="COPY FULL LOG"
+        android:layout_marginBottom="8dp" />
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Live Log (last 30 lines):"
+        android:text="Live Log (last 40 lines):"
         android:textStyle="bold"
         android:layout_marginBottom="4dp" />
 
@@ -56,6 +70,6 @@
         android:layout_height="wrap_content"
         android:text="File: Android/data/com.ashxmay.ffproxymonitor/files/ff_proxy_monitor_log.txt"
         android:textSize="10sp"
-        android:layout_marginTop="8dp" />
+        android:layout_marginTop="6dp" />
 
 </LinearLayout>
